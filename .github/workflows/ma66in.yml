@@ -1,0 +1,114 @@
+name: Truy Cập Từ Xa Windows Server 2022
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2022
+    timeout-minutes: 3600
+
+    steps:
+      - name: ⚙️ Cấu Hình RDP và Tường Lửa Windows
+        run: |
+          Write-Host "Kích hoạt Remote Desktop và mở cổng Tường Lửa..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Inbound"
+          netsh advfirewall firewall add rule name="RDP-Inbound" `
+            dir=in action=allow protocol=TCP localport=3389
+          Write-Host "Cấu hình RDP hoàn tất."
+
+      - name: 🔐 Tạo Người Dùng Admin123 và Mật Khẩu Bảo Mật
+        run: |
+          $RDP_USER = "Admin123"
+          Write-Host "Bắt đầu tạo người dùng $RDP_USER..."
+          
+          # Logic tạo mật khẩu ngẫu nhiên và bảo mật
+          Add-Type -AssemblyName System.Security
+          $charSet = @{ Upper=[char[]](65..90); Lower=[char[]](97..122); Number=[char[]](48..57); Special=([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)) }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random -Count 16 })
+          
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          New-LocalUser -Name $RDP_USER -Password $securePass -AccountNeverExpires
+          
+          Add-LocalGroupMember -Group "Administrators" -Member $RDP_USER
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $RDP_USER
+          
+          echo "RDP_USER=$RDP_USER" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          
+          Write-Host "Tạo người dùng và đặt mật khẩu bảo mật hoàn tất. User: $RDP_USER"
+
+      - name: ⬇️ Cài Đặt Tailscale (Sử dụng URL mới)
+        run: |
+          Write-Host "Tải và cài đặt Tailscale để tạo kết nối bảo mật..."
+          
+          # CẬP NHẬT: Dùng URL tải xuống phiên bản ổn định mới nhất
+          # Đây là URL chính thức từ Tailscale, hy vọng sẽ khắc phục lỗi "Not Found"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-x64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Write-Host "Đang tải Tailscale từ $tsUrl..."
+          
+          # Tải xuống (bước này bị lỗi trước đó)
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          
+          Write-Host "Tải xuống thành công. Bắt đầu cài đặt..."
+          
+          # Cài đặt
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          Write-Host "Cài đặt Tailscale hoàn tất."
+
+      - name: 🔗 Thiết Lập Kết Nối Tailscale
+        run: |
+          Write-Host "Kết nối với Tailnet của bạn..."
+          $TS_EXE = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          
+          # Kiểm tra sự tồn tại của file exe trước khi chạy
+          if (-not (Test-Path $TS_EXE)) {
+              Write-Error "Lỗi: Không tìm thấy Tailscale.exe tại $TS_EXE. Quá trình cài đặt có thể đã thất bại."
+              exit 1
+          }
+
+          # Sử dụng Auth Key để kích hoạt Tailscale
+          & "$TS_EXE" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win2022-rdp-$env:GITHUB_RUN_ID --ssh
+          
+          # Đợi Tailscale gán IP
+          $tsIP = $null
+          $retries = 0
+          Write-Host "Đang chờ Tailscale gán địa chỉ IP..."
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$TS_EXE" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Lỗi: Tailscale không gán được địa chỉ IP. Vui lòng kiểm tra Auth Key."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Đã gán IP thành công: $tsIP"
+      
+      - name: 🛑 Duy Trì Kết Nối và Hiển Thị Thông Tin Truy Cập
+        run: |
+          Write-Host "`n=== THÔNG TIN TRUY CẬP RDP ==="
+          Write-Host "Hệ Điều Hành: Windows Server 2022"
+          Write-Host "Địa Chỉ (Tailscale IP): $env:TAILSCALE_IP"
+          Write-Host "Tên Người Dùng: $env:RDP_USER"
+          Write-Host "Mật Khẩu (Bảo mật): $env:RDP_PASSWORD"
+          Write-Host "============================`n"
+          
+          # Vòng lặp vô hạn để giữ cho Runner hoạt động
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP đang hoạt động - Vui lòng dùng Ctrl+C trong workflow để kết thúc."
+              Start-Sleep -Seconds 300
+          }

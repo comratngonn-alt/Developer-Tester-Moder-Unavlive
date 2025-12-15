@@ -1,0 +1,100 @@
+name: Truy Cập Từ Xa Windows Server 2022
+
+on:
+  # Kích hoạt thủ công từ giao diện GitHub Actions
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    # Sử dụng Windows Server 2022 Runner
+    runs-on: windows-2022
+    # Đặt thời gian timeout tối đa 6 giờ (3600 phút)
+    timeout-minutes: 3600
+
+    steps:
+      - name: ⚙️ Cấu Hình RDP và Tường Lửa Windows
+        run: |
+          Write-Host "Kích hoạt Remote Desktop và mở cổng Tường Lửa..."
+          # Bật Remote Desktop bằng cách đặt fDenyTSConnections = 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # Xóa luật cũ nếu tồn tại
+          netsh advfirewall firewall delete rule name="RDP-Inbound"
+          
+          # Mở cổng RDP (3389) qua Tường Lửa (Firewall)
+          netsh advfirewall firewall add rule name="RDP-Inbound" `
+            dir=in action=allow protocol=TCP localport=3389
+          
+          Write-Host "Cấu hình RDP hoàn tất."
+
+      - name: 🔐 Tạo Người Dùng Admin123 và Mật Khẩu Bảo Mật
+        run: |
+          $RDP_USER = "Admin123"
+          Write-Host "Bắt đầu tạo người dùng $RDP_USER..."
+          
+          # Logic tạo mật khẩu ngẫu nhiên và bảo mật (tối thiểu 16 ký tự)
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      
+              Lower   = [char[]](97..122)     
+              Number  = [char[]](48..57)      
+              Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random -Count 16 })
+          
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Tạo người dùng Admin123 và đặt mật khẩu
+          New-LocalUser -Name $RDP_USER -Password $securePass -AccountNeverExpires
+          
+          # Thêm người dùng vào nhóm Administrators (theo yêu cầu)
+          Add-LocalGroupMember -Group "Administrators" -Member $RDP_USER
+          
+          # Thêm người dùng vào nhóm Remote Desktop Users
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $RDP_USER
+          
+          # Lưu thông tin vào biến môi trường
+          echo "RDP_USER=$RDP_USER" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          
+          Write-Host "Tạo người dùng và đặt mật khẩu bảo mật hoàn tất. User: $RDP_USER"
+
+      - name: 🔗 Thiết Lập Kết Nối Tailscale (Sử dụng Action ổn định)
+        # Action này tự động cài đặt Tailscale và kết nối
+        uses: tailscale/github-action@v2
+        with:
+          # Vui lòng đảm bảo bạn đã tạo Secret TAILSCALE_AUTH_KEY
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }} 
+          hostname: win2022-rdp-${{ github.run_id }}
+          # Kích hoạt SSH (tùy chọn)
+          setup-ssh: true 
+
+      - name: 🛑 Duy Trì Kết Nối và Hiển Thị Thông Tin Truy Cập
+        run: |
+          # Tailscale Action sẽ đặt IP vào biến môi trường $env:TS_IP
+          $tsIP = $env:TS_IP
+          
+          if (-not $tsIP) {
+               Write-Host "Cảnh báo: Không tìm thấy $env:TS_IP. Thử lấy IP bằng lệnh Tailscale..."
+               # Lệnh dự phòng để lấy IP
+               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          }
+          
+          Write-Host "`n=== THÔNG TIN TRUY CẬP RDP ==="
+          Write-Host "Hệ Điều Hành: Windows Server 2022"
+          Write-Host "Địa Chỉ (Tailscale IP): $tsIP"
+          Write-Host "Tên Người Dùng: $env:RDP_USER"
+          Write-Host "Mật Khẩu (Bảo mật): $env:RDP_PASSWORD"
+          Write-Host "============================`n"
+          
+          # Vòng lặp vô hạn để giữ cho Runner hoạt động
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP đang hoạt động - Kết nối bằng Microsoft Remote Desktop Client."
+              Start-Sleep -Seconds 300
+          }
